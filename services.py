@@ -460,60 +460,185 @@ async def _fetch_cryptocompare_historical(
         )
         return 0.0
 
+async def _fetch_coingecko_historical(asset_id, day):
+    """دریافت قیمت تاریخی از CoinGecko."""
+    url = (
+        f"https://api.coingecko.com/api/v3/coins/"
+        f"{asset_id}/history"
+    )
 
-async def fetch_historical_crypto_price(
-    asset_id,
-    date_str,
-):
-    """
-    قیمت تاریخی یک واحد دارایی به USDT.
-
-    اولویت:
-    1. کندل روزانهٔ Binance
-    2. قیمت تاریخی CryptoCompare در صورت نبود دادهٔ Binance
-
-    تتر طبق تصمیم پروژه همیشه 1 USDT فرض می‌شود.
-    """
-    if asset_id == "tether":
-        return 1.0
-
-    day = _normalize_date(date_str)
-
-    symbol = BINANCE_SYMBOLS.get(asset_id)
-
-    if not symbol:
-        raise ValueError(
-            f"نماد بازار برای {asset_id} تعریف نشده است."
-        )
+    params = {
+        "date": day.strftime("%d-%m-%Y"),
+        "localization": "false",
+    }
 
     try:
-        price = await _fetch_binance_historical(
-            symbol,
-            day,
+        data = await _get_json(url, params)
+
+        price = (
+            data.get("market_data", {})
+            .get("current_price", {})
+            .get("usd")
         )
 
-        if price > 0:
-            return price
+        if price is not None and float(price) > 0:
+            return float(price)
 
     except Exception:
         logger.warning(
-            "قیمت تاریخی %s از Binance دریافت نشد",
+            "قیمت تاریخی %s از CoinGecko دریافت نشد",
             asset_id,
             exc_info=True,
         )
 
-    fallback_price = await _fetch_cryptocompare_historical(
-        asset_id,
-        day,
-    )
+    return 0.0
 
-    if fallback_price > 0:
-        return fallback_price
+async def _fetch_arzdigital_historical(asset_id, day):
+    """خواندن تاریخچه قابل‌استخراج از صفحه ارزدیجیتال."""
+    import re
+    from html.parser import HTMLParser
+    from datetime import datetime
+    from history_archive import save_price
+
+    slugs = {
+        "bitcoin": "bitcoin",
+        "ethereum": "ethereum",
+        "ripple": "xrp",
+        "pax-gold": "pax-gold",
+    }
+
+    slug = slugs.get(asset_id)
+    if not slug:
+        return 0.0
+
+    url = f"https://arzdigital.com/coins/{slug}/historical-data/"
+
+    class TextParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.parts = []
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    try:
+        session = await _get_session()
+
+        async with session.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as response:
+            response.raise_for_status()
+            html = await response.text()
+
+        parser = TextParser()
+        parser.feed(html)
+        text = " ".join(parser.parts)
+
+        pattern = (
+            r"\b([A-Z][a-z]{2}\s+\d{1,2},\s+\d{4})"
+            r"\s+\$([\d,]+(?:\.\d+)?)"
+        )
+
+        records = {}
+
+        for date_text, price_text in re.findall(pattern, text):
+            try:
+                actual_day = datetime.strptime(
+                    date_text, "%b %d, %Y"
+                ).date().isoformat()
+
+                price = float(price_text.replace(",", ""))
+
+                if price > 0:
+                    records[actual_day] = price
+
+            except (ValueError, TypeError):
+                continue
+
+        # تمام رکوردهای استخراج‌شده را با تاریخ واقعی ذخیره کن.
+        for actual_day, price in records.items():
+            save_price(asset_id, actual_day, price)
+
+        requested_day = day.date().isoformat()
+        return records.get(requested_day, 0.0)
+
+    except Exception:
+        logger.warning(
+            "دریافت تاریخچه %s از ارزدیجیتال ناموفق بود",
+            asset_id,
+            exc_info=True,
+        )
+        return 0.0
+
+async def fetch_historical_crypto_price(asset_id, date_str):
+    from history_archive import save_price, get_nearest_price
+
+    day = _normalize_date(date_str)
+    day_str = day.strftime("%Y-%m-%d")
+
+    if asset_id == "tether":
+        save_price(asset_id, day_str, 1.0)
+        return 1.0
+
+    symbol = BINANCE_SYMBOLS.get(asset_id)
+
+    # 1. Binance
+    if symbol:
+        try:
+            price = await _fetch_binance_historical(symbol, day)
+            if price and price > 0:
+                save_price(asset_id, day_str, price)
+                return float(price)
+        except Exception:
+            logger.warning("Binance failed for %s", asset_id, exc_info=True)
+
+    # 2. CryptoCompare
+    try:
+        price = await _fetch_cryptocompare_historical(asset_id, day)
+        if price and price > 0:
+            save_price(asset_id, day_str, price)
+            return float(price)
+    except Exception:
+        logger.warning("CryptoCompare failed for %s", asset_id, exc_info=True)
+
+    # 3. CoinGecko
+    try:
+        price = await _fetch_coingecko_historical(asset_id, day)
+        if price and price > 0:
+            save_price(asset_id, day_str, price)
+            return float(price)
+    except Exception:
+        logger.warning("CoinGecko failed for %s", asset_id, exc_info=True)
+
+    # 4. ArzDigital
+    try:
+        price = await _fetch_arzdigital_historical(asset_id, day)
+
+        if price and price > 0:
+            return float(price)
+
+    except Exception:
+        logger.warning(
+            "ArzDigital failed for %s",
+            asset_id,
+            exc_info=True,
+        )    
+
+    # 5. آرشیو محلی
+    archived = get_nearest_price(asset_id, day_str)
+
+    if archived:
+        archived_price, archived_date = archived
+        logger.warning(
+            "Using archived price for %s: requested=%s, actual=%s",
+            asset_id, day_str, archived_date,
+        )
+        return float(archived_price)
 
     raise ValueError(
-        f"قیمت تاریخی معتبر {asset_id.upper()} "
-        f"برای تاریخ {day.strftime('%Y-%m-%d')} "
-        "در هیچ‌یک از منابع در دسترس نبود."
+        f"قیمت تاریخی {asset_id.upper()} برای {day_str} "
+        "در منابع آنلاین یا آرشیو پیدا نشد."
     )
 
 

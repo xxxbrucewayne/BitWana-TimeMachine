@@ -47,6 +47,14 @@ ASSETS = {
     "pax-gold": "🪙 پکس گلد (PAXG)",
 }
 
+ASSET_START_DATES = {
+    "bitcoin": date(2009, 1, 3),
+    "ethereum": date(2015, 7, 30),
+    "tether": date(2014, 10, 6),
+    "ripple": date(2012, 6, 2),
+    "pax-gold": date(2019, 9, 5),
+}
+
 BOT_PROXY = os.getenv("BOT_PROXY", "").strip()
 
 AMOUNTS = [
@@ -146,7 +154,7 @@ def amount_keyboard():
 
     rows.append([
         InlineKeyboardButton(
-            text="✍️ واردکردن مبلغ دلخواه",
+            text="✍️ واردکردن مبلغ دلخواه (به تومان وارد کنید)",
             callback_data="amount:custom",
         )
     ])
@@ -383,10 +391,11 @@ async def asset_selected_handler(callback: CallbackQuery, state: FSMContext):
 
     if callback.message:
         await callback.message.answer(
-            f"دارایی انتخاب‌شده: {ASSETS[asset_id]}\n\n"
-            "مبلغ سرمایه‌گذاری را انتخاب کنید:",
-            reply_markup=amount_keyboard(),
-        )
+    f"دارایی انتخاب‌شده: {ASSETS[asset_id]}\n\n"
+    "💰 تمام قیمت‌ها و مبالغ این ربات به تومان هستند.\n"
+    "مبلغ سرمایه‌گذاری را انتخاب کنید:",
+    reply_markup=amount_keyboard(),
+)
 
 
 async def amount_button_handler(callback: CallbackQuery, state: FSMContext):
@@ -622,6 +631,21 @@ async def finish_date_selection(message: Message, state: FSMContext, day: int):
         gregorian_date = selected_date
         jalali_date = jdatetime.date.fromgregorian(date=selected_date)
 
+    asset_id = data.get("asset_id")
+    asset_start_date = ASSET_START_DATES.get(asset_id)
+
+    if asset_start_date and gregorian_date < asset_start_date:
+        await message.answer(
+            "⚠️ <b>امکان انجام محاسبه برای تاریخ انتخاب‌شده وجود ندارد.</b>\n\n"
+            "تاریخ انتخابی شما پیش از ایجاد یا عرضه این دارایی است؛ "
+            "بنابراین امکان شبیه‌سازی سرمایه‌گذاری روی این دارایی در آن تاریخ وجود ندارد.\n\n"
+            "لطفاً تاریخ دیگری، پس از عرضه این دارایی، انتخاب فرمایید.\n\n"
+            "از همراهی شما سپاسگزاریم. 🙏",
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
     await message.answer(
         "تاریخ ثبت شد. در حال دریافت داده‌های تاریخی و قیمت‌های فعلی هستم؛ "
         "لطفاً چند لحظه صبر کنید."
@@ -721,8 +745,8 @@ async def process_final_calculation(
         f"• ارزش فعلی سرمایه: {format_number(curr_value_toman, 2)} تومان\n"
         f"• ارزش فعلی دلاری: {format_number(curr_value_usd, 2)} دلار\n\n"
         f"{result_emoji} <b>نتیجه: {result_title}</b>\n"
-        f"• سود/زیان تومانی: {sign_toman}{format_number(profit_toman, 2)} تومان\n"
-        f"• سود/زیان دلاری: {sign_usd}{format_number(profit_usd, 2)} دلار\n"
+        f"• {'سود' if profit_toman > 0 else 'زیان' if profit_toman < 0 else 'مبلغ تغییرکرده'} تومانی: {sign_toman}{format_number(profit_toman, 2)} تومان\n"
+        f"• {'سود' if profit_usd > 0 else 'زیان' if profit_usd < 0 else 'مبلغ تغییرکرده'} دلاری: {sign_usd}{format_number(profit_usd, 2)} دلار\n" 
         f"• درصد تغییر ارزش: {sign_percent}{format_number(profit_percent, 2)}٪\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "⚠️ این گزارش شبیه‌سازی است. کارمزدها، اختلاف قیمت خرید و فروش "
@@ -840,3 +864,4 @@ if __name__ == "__main__":
         logger.info("اجرای ربات متوقف شد.")
     except Exception:
         logger.exception("اجرای ربات با خطا متوقف شد.")
+        
